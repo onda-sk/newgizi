@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <title>RTMMG - 議事録表示</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        body { font-family: sans-serif; margin: 2em; }
+        #meeting-id-form { margin-bottom: 1em; }
+        #minutes { border: 1px solid #ccc; padding: 1em; min-height: 300px; background: #f9f9f9; }
+        #options-panel {
+            position: fixed; left: 0; right: 0; bottom: -320px; background: #fff; border-top: 2px solid #007bff;
+            box-shadow: 0 -2px 8px rgba(0,0,0,0.1); transition: bottom 0.3s; z-index: 100;
+            padding: 1em 2em;
+        }
+        #options-panel.open { bottom: 0; }
+        #options-toggle { position: fixed; left: 50%; bottom: 0; transform: translateX(-50%); background: #007bff; color: #fff; border: none; border-radius: 1em 1em 0 0; padding: 0.5em 2em; font-size: 1.1em; cursor: pointer; z-index: 101;}
+        label { display: block; margin-top: 0.7em; }
+        input, textarea { width: 100%; font-size: 1em; margin-top: 0.2em; }
+    </style>
+</head>
+<body>
+    <h1>リアルタイム議事録（PC）</h1>
+    <form id="meeting-id-form">
+        <label>会議ID（スマホに表示された5桁英数字）:
+            <input type="text" id="meeting-id-input" maxlength="5" style="font-size:1.5em; width:8em;" required>
+        </label>
+        <button type="submit">議事録表示開始</button>
+    </form>
+    <div id="minutes">ここにリアルタイム議事録が表示されます</div>
+    <button id="options-toggle">▼ オプション</button>
+    <div id="options-panel">
+        <h2>会議情報</h2>
+        <label>会議名: <input type="text" id="opt-title" value="定例会議"></label>
+        <label>出席者: <input type="text" id="opt-members" value="山田, 佐藤, 鈴木"></label>
+        <label>日時: <input type="text" id="opt-date" value="2025-04-22 10:00"></label>
+        <label>アジェンダ: <textarea id="opt-agenda" rows="2">進捗報告, 課題共有, 次回予定</textarea></label>
+        <label>目的: <textarea id="opt-purpose" rows="2">会議の目的を明確にし、効率的な議論を行う</textarea></label>
+        <label>プロンプト: <textarea id="opt-prompt" rows="2">議事録をMarkdown形式で要約してください。</textarea></label>
+        <button id="options-close" style="margin-top:1em;">閉じる</button>
+    </div>
+    <script src="/static/pc.js"></script>
+</body>
+</html>

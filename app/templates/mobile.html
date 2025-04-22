@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <title>RTMMG - スマホ録音</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        body { font-family: sans-serif; text-align: center; margin: 2em; }
+        #meeting-id { font-size: 2.5em; font-weight: bold; margin: 1em 0; }
+        button { font-size: 1.2em; margin: 0.5em; padding: 0.7em 2em; }
+        #status { margin: 1em 0; color: #007bff; }
+        #transcript { margin: 1em 0; font-size: 1.1em; color: #333; }
+    </style>
+</head>
+<body>
+    <h1>リアルタイム議事録（スマホ）</h1>
+    <div id="meeting-id">{{ meeting_id }}</div>
+    <div>
+        <button id="start-btn">録音開始</button>
+        <button id="pause-btn" disabled>一時停止</button>
+        <button id="stop-btn" disabled>停止</button>
+    </div>
+    <div id="status">待機中</div>
+    <div id="transcript"></div>
+    <script>
+        // サーバーから渡された会議IDをJSにも渡す
+        window.meetingId = "{{ meeting_id }}";
+    </script>
+    <script src="/static/mobile.js"></script>
+</body>
+</html>
