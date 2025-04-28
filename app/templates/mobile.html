@@ -16,6 +16,14 @@
     <h1>リアルタイム議事録（スマホ）</h1>
     <div id="meeting-id">{{ meeting_id }}</div>
     <div>
+        <label for="mic-select" style="font-size:1em;">マイク選択：</label>
+        <select id="mic-select" style="font-size:1em; margin-bottom:0.5em;"></select>
+    </div>
+    <div>
+        <label for="mobile-topic" style="font-size:1em;">議題：</label>
+        <input type="text" id="mobile-topic" style="font-size:1em; width:80%; margin-bottom:0.5em;" placeholder="例：進捗報告、課題共有など">
+    </div>
+    <div>
         <button id="start-btn">録音開始</button>
         <button id="pause-btn" disabled>一時停止</button>
         <button id="stop-btn" disabled>停止</button>

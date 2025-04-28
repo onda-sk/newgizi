@@ -1,53 +1,74 @@
-# RTMMG (Real-time Meeting Minutes Generator)
+# RTMMG（リアルタイム議事録）セットアップ・運用手順
 
-## セットアップ手順（Ubuntu Linux想定）
+## 概要
+本アプリケーションは、Apache HTTP Server + mod_auth_mellon（Entra ID認証）環境下で、127.0.0.1:14035でFastAPIアプリとして動作し、/opt/rtmmg/配下に配置して運用します。
 
-```bash
-cd /opt/rtmmg/app
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+## ディレクトリ構成例
+```
+/opt/rtmmg/
+├── app/
+│   ├── main.py
+│   ├── requirements.txt
+│   ├── static/
+│   └── templates/
+├── .env
+├── README.md
+└── ...
 ```
 
-## サーバー起動例
+## Python仮想環境の作成・モジュールインストール
+```sh
+cd /opt/rtmmg/
+python3 -m venv .
+source bin/activate
+pip install --upgrade pip
+pip install -r app/requirements.txt
+```
 
-```bash
+## .envファイル
+OpenAI APIキー等、必要な環境変数を`.env`に記載してください。
+例：
+```
+OPENAI_API_KEY=sk-xxxxxxx
+```
+
+## アプリケーションの起動
+```sh
+cd /opt/rtmmg/
+source bin/activate
 uvicorn app.main:app --host 127.0.0.1 --port 14035
 ```
 
-## OpenAI APIキーの設定
+## Apache HTTP Server（mod_auth_mellon/Entra ID認証）との連携例
 
-OpenAI APIキーは `.env` ファイルに記載してください。  
-アプリケーション起動時に自動で読み込まれます（python-dotenv使用）。
+### 1. Apache側のリバースプロキシ設定例
+```apache
+<VirtualHost *:443>
+    ServerName your.domain.example
 
-### .envファイル例
+    # Entra ID認証（mod_auth_mellon）設定は既存のものを利用
 
+    ProxyPass /rtmmg/ http://127.0.0.1:14035/rtmmg/
+    ProxyPassReverse /rtmmg/ http://127.0.0.1:14035/rtmmg/
+    ProxyPass /static/ http://127.0.0.1:14035/static/
+    ProxyPassReverse /static/ http://127.0.0.1:14035/static/
+</VirtualHost>
 ```
-OPENAI_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-```
+- `/rtmmg/`配下にアプリの全機能が集約されるようmain.pyを設計しています。
+- 認証はApache側で完了している前提です。アプリ側での追加認証は不要です。
 
-`.env` ファイルは `app` ディレクトリ直下（`newgizi/app/.env`）に配置してください。
+### 2. 静的ファイル・WebSocket
+- 静的ファイル（/static/）もリバースプロキシ対象に含めてください。
+- WebSocket（/rtmmg/socket）はmod_proxy_wstunnelが有効な場合、自動的にプロキシされます。
 
-- 旧方式（環境変数export）は不要です。
-- サーバー起動は通常通りでOKです。
+## 注意事項
+- サーバー起動時は仮想環境を有効化してください。
+- 必要に応じてsystemd等でサービス化してください。
+- Python3.8以上を推奨します。
 
-```bash
-uvicorn app.main:app --host 127.0.0.1 --port 14035
-```
+## 開発・運用に関する補足
+- アプリ本体の機能・API仕様は`app/main.py`を参照してください。
+- 企業認証はApache+mod_auth_mellonで完了しているため、アプリ側の認証画面はスキップ可能です（必要に応じてUIから除外してください）。
+- セキュリティ要件に応じて、/rtmmg/配下へのアクセス制御をApache側で行ってください。
 
-- Apache HTTP Serverのリバースプロキシ設定で127.0.0.1:14035に転送してください。
-- Entra ID認証はmod_auth_mellonで既に組み込まれている前提です。
-
-## ディレクトリ構成
-
-```
-app/
-  ├── __init__.py
-  ├── main.py
-  ├── requirements.txt
-  ├── static/
-  │     ├── mobile.js
-  │     └── pc.js
-  └── templates/
-        ├── mobile.html
-        └── pc.html
+---
