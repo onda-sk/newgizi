@@ -5,6 +5,10 @@ let transcriptDiv = document.getElementById('transcript');
 let statusDiv = document.getElementById('status');
 let meetingId = window.meetingId || "";
 let selectedMicId = null;
+let allAudioBlobs = []; // 停止時にまとめる
+let currentMediaStream = null;
+let currentMediaRecorder = null;
+let currentAudioBlobs = [];
 
 
 // マイク一覧を取得して<select>に表示
@@ -83,7 +87,11 @@ async function populateMicList() {
 async function activateSelectedMic() {
     if (!selectedMicId) return;
     try {
-        await navigator.mediaDevices.getUserMedia({ audio: { deviceId: { exact: selectedMicId } } });
+        if (selectedMicId) {
+            await navigator.mediaDevices.getUserMedia({ audio: { deviceId: { exact: selectedMicId } } });
+        } else {
+            await navigator.mediaDevices.getUserMedia({ audio: true });
+        }
     } catch (e) {
         setStatus("マイク取得エラー: " + e.message);
     }
@@ -106,13 +114,33 @@ async function startRecognition() {
     }
     // 録音開始時にも毎回マイク利用許可を取得
     try {
-        await navigator.mediaDevices.getUserMedia({ audio: true });
+        if (selectedMicId) {
+            currentMediaStream = await navigator.mediaDevices.getUserMedia({ audio: { deviceId: { exact: selectedMicId } } });
+        } else {
+            currentMediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        }
     } catch (e) {
         setStatus("マイク利用許可が必要です: " + e.message);
         return;
     }
     // 選択マイクをアクティブに
     await activateSelectedMic();
+
+    // MediaRecorderで音声データも取得
+    if (currentMediaStream) {
+        try {
+            currentAudioBlobs = [];
+            currentMediaRecorder = new MediaRecorder(currentMediaStream);
+            currentMediaRecorder.ondataavailable = (event) => {
+                if (event.data && event.data.size > 0) {
+                    currentAudioBlobs.push(event.data);
+                }
+            };
+            currentMediaRecorder.start();
+        } catch (e) {
+            setStatus("MediaRecorderエラー: " + e.message);
+        }
+    }
 
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     recognition = new SpeechRecognition();
@@ -123,7 +151,6 @@ async function startRecognition() {
     recognition.onstart = () => setStatus("録音中...(onstart発火)");
     recognition.onend = () => {
         setStatus("一時停止中(onend発火)");
-        // 録音停止ボタンが押されていない限り自動再開
         if (isRecording) {
             setTimeout(() => { startRecognition(); }, 300);
         }
@@ -132,32 +159,38 @@ async function startRecognition() {
 
     recognition.onresult = (event) => {
         setStatus("onresult発火: " + event.results.length + "件");
-        let finalTranscript = '';
+        let sentenceBuffer = "";
         for (let i = event.resultIndex; i < event.results.length; ++i) {
             let transcript = event.results[i][0].transcript;
             if (event.results[i].isFinal) {
-                finalTranscript += transcript;
-                setStatus("final: " + transcript);
-                if (transcript && transcript.trim() !== "") {
-                    sendTranscript(transcript, true);
+                sentenceBuffer += transcript;
+                // 句点（。！？）で区切って文章単位で送信
+                let sentences = sentenceBuffer.split(/(?<=[。！？\?！\!])/);
+                for (let s of sentences) {
+                    if (s.trim().length > 0) {
+                        sendTranscript(s.trim(), true);
+                    }
                 }
+                transcriptDiv.textContent = sentenceBuffer;
+                sentenceBuffer = "";
             } else {
                 setStatus("interim: " + transcript);
-                if (transcript && transcript.trim() !== "") {
-                    sendTranscript(transcript, false);
-                }
             }
         }
-        // finalTranscriptが空でなければ必ず送信
-        if (finalTranscript && finalTranscript.trim() !== "") {
-            sendTranscript(finalTranscript, true);
-        }
-        transcriptDiv.textContent = finalTranscript;
     };
 
     recognition.start();
     isRecording = true;
     setButtons(false, true, true);
+
+    // 10秒ごとにバッファを送信
+    if (window._sendInterval) clearInterval(window._sendInterval);
+    window._sendInterval = setInterval(() => {
+        if (!isRecording) { clearInterval(window._sendInterval); return; }
+        if (transcriptDiv.textContent.trim() !== '') {
+            sendTranscript(transcriptDiv.textContent.trim(), false);
+        }
+    }, 10000);
 }
 
 function pauseRecognition() {
@@ -172,23 +205,25 @@ function pauseRecognition() {
 function stopRecognition() {
     // 録音停止時にfinalTranscriptが残っていれば必ず送信
     if (typeof recognition !== "undefined" && recognition) {
-        // 直前のfinalTranscriptを取得
         let finalTranscript = transcriptDiv.textContent || "";
         if (finalTranscript && finalTranscript.trim() !== "") {
             sendTranscript(finalTranscript, true);
         }
         recognition.stop();
     }
-    if (ws) {
-        // finalTranscript送信後、WebSocket closeを0.5秒遅らせる
-        setTimeout(() => {
-            ws.close();
-            ws = null;
-        }, 500);
-    }
     setStatus("停止しました");
     setButtons(true, false, false);
     isRecording = false;
+
+    // MediaRecorder停止＆音声データまとめ
+    if (currentMediaRecorder && currentMediaRecorder.state !== "inactive") {
+        currentMediaRecorder.stop();
+    }
+    if (currentAudioBlobs && currentAudioBlobs.length > 0) {
+        allAudioBlobs = allAudioBlobs.concat(currentAudioBlobs);
+        currentAudioBlobs = [];
+    }
+
     // 録音停止後に/finalize_minutesで最終議事録を即時生成＆共有UI表示
     if (window.meetingId) {
         fetch(`/rtmmg/finalize_minutes`, {
@@ -214,16 +249,18 @@ function showShareOptions(minutesText) {
     }
     shareDiv.innerHTML = `
         <h2>議事録が完成しました</h2>
-        <textarea style="width:98vw;max-width:700px;height:40vh;min-height:300px;font-size:1.1em;padding:1em;box-sizing:border-box;resize:vertical;">${minutesText}</textarea><br>
+        <textarea style="width:100%;max-width:700px;height:40vh;min-height:300px;font-size:1.1em;padding:1em;box-sizing:border-box;resize:vertical;overflow-x:auto;">${minutesText}</textarea><br>
         <button id="copy-minutes-btn" style="font-size:1.1em;padding:0.7em 2em;margin:0.5em;">コピー</button>
         <a id="download-minutes-btn" href="#" download="minutes.txt" style="font-size:1.1em;padding:0.7em 2em;margin:0.5em;">ダウンロード</a>
+        <a id="download-audio-btn" href="#" download="recording.mp3" style="font-size:1.1em;padding:0.7em 2em;margin:0.5em;">音声(mp3)ダウンロード</a>
     `;
-    shareDiv.style.maxWidth = "98vw";
+    shareDiv.style.maxWidth = "700px";
     shareDiv.style.margin = "2em auto";
     shareDiv.style.padding = "1em";
     shareDiv.style.background = "#f8f9fa";
     shareDiv.style.borderRadius = "12px";
     shareDiv.style.boxShadow = "0 2px 8px rgba(0,0,0,0.08)";
+    shareDiv.style.overflowX = "auto";
     document.getElementById('copy-minutes-btn').onclick = function() {
         navigator.clipboard.writeText(minutesText);
         alert("コピーしました");
@@ -233,7 +270,6 @@ function showShareOptions(minutesText) {
         // BOM付きUTF-8で保存（Windowsメモ帳等で文字化け防止）
         const blob = new Blob(["\uFEFF" + minutesText], {type: "text/plain;charset=utf-8"});
         const url = URL.createObjectURL(blob);
-        // 一時的なaタグを生成してclick
         const a = document.createElement('a');
         a.href = url;
         a.download = "minutes.txt";
@@ -241,6 +277,41 @@ function showShareOptions(minutesText) {
         a.click();
         document.body.removeChild(a);
         setTimeout(() => URL.revokeObjectURL(url), 1000);
+    };
+    document.getElementById('download-audio-btn').onclick = async function(e) {
+        e.preventDefault();
+        // すべての録音データをwebmとしてサーバーにアップロードし、m4a変換URLを取得
+        let blobs = [];
+        if (allAudioBlobs && allAudioBlobs.length > 0) {
+            blobs = blobs.concat(allAudioBlobs);
+        }
+        if (currentAudioBlobs && currentAudioBlobs.length > 0) {
+            blobs = blobs.concat(currentAudioBlobs);
+        }
+        if (blobs.length > 0) {
+            const combinedBlob = new Blob(blobs, { type: 'audio/webm' });
+            const formData = new FormData();
+            formData.append("meeting_id", window.meetingId || "");
+            formData.append("file", combinedBlob, "recording.webm");
+            setStatus("サーバーに音声ファイルをアップロード中...");
+            try {
+                const res = await fetch("/rtmmg/upload_audio", {
+                    method: "POST",
+                    body: formData
+                });
+                const data = await res.json();
+                if (data.status === "ok" && data.download_url) {
+                    setStatus("m4a変換完了。ダウンロードを開始します。");
+                    window.location.href = data.download_url;
+                } else {
+                    alert("m4a変換エラー: " + (data.message || "不明なエラー"));
+                }
+            } catch (err) {
+                alert("アップロードまたは変換エラー: " + err);
+            }
+        } else {
+            alert("音声データがありません。");
+        }
     };
 }
 

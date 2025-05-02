@@ -1,10 +1,28 @@
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, Body
-from fastapi.responses import HTMLResponse, JSONResponse
+import logging
+import os
+from datetime import datetime
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, Body, UploadFile, File
+from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 import secrets
 from dotenv import load_dotenv
 load_dotenv("/opt/onda_work/RTMMG/myproject/.venv/newgizi/app/.env", override=True)
+
+# ログ設定
+log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+if not os.path.exists(log_dir):
+    os.makedirs(log_dir)
+log_filename = datetime.now().strftime("%Y-%m-%d") + ".log"
+log_path = os.path.join(log_dir, log_filename)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.FileHandler(log_path, encoding="utf-8"),
+        logging.StreamHandler()
+    ]
+)
 
 app = FastAPI()
 
@@ -25,7 +43,6 @@ issued_meeting_ids = set()
 async def auth(data: dict = Body(...)):
     company_id = data.get("company_id")
     company_pass = data.get("company_pass")
-    # 仮認証: company_id/passが"demo"/"pass"ならOK
     if company_id == "demo" and company_pass == "pass":
         meeting_id = generate_meeting_id()
         issued_meeting_ids.add(meeting_id)
@@ -33,54 +50,42 @@ async def auth(data: dict = Body(...)):
     else:
         return JSONResponse({"status": "ng", "message": "認証情報が正しくありません"}, status_code=401)
 
-# --- meeting_id登録API（PC側） ---
 @app.post("/rtmmg/register")
 async def register(data: dict = Body(...)):
     meeting_id = data.get("meeting_id", "")
     if meeting_id in issued_meeting_ids:
-        # PCがこのmeeting_idで登録したことを記録（必要なら拡張可）
         return JSONResponse({"status": "ok"})
     else:
         return JSONResponse({"status": "ng", "message": "無効な会議IDです"}, status_code=400)
 
-# スマホ用画面
 @app.get("/rtmmg/mobile", response_class=HTMLResponse)
 async def mobile(request: Request):
     meeting_id = generate_meeting_id()
     issued_meeting_ids.add(meeting_id)
     return templates.TemplateResponse("mobile.html", {"request": request, "meeting_id": meeting_id})
 
-# PC用画面
 @app.get("/rtmmg/", response_class=HTMLResponse)
 async def pc(request: Request):
     return templates.TemplateResponse("pc.html", {"request": request})
 
-# WebSocketエンドポイント
 import asyncio
 import json
 import time
 
-# 会議ごとのバッファとタイマー
 buffers = {}
 last_update = {}
-# 無音による議事録生成済みフラグ
 silence_generated = {}
-# 会議ごとの全発言記録
 all_texts = {}
-# 会議ごとの議題
 topics = {}
 
 @app.websocket("/rtmmg/socket")
 async def websocket_endpoint(websocket: WebSocket):
-    # Originチェック
     allowed_origins = [
         "http://localhost",
         "https://localhost",
         "http://127.0.0.1",
         "https://127.0.0.1",
         "https://queryaiservice.japaneast.cloudapp.azure.com",
-        # 必要に応じて本番ドメインを追加
-        # "https://example.com"
     ]
     origin = websocket.headers.get("origin")
     print(f"[WebSocket接続] Origin: {origin}")
@@ -94,24 +99,26 @@ async def websocket_endpoint(websocket: WebSocket):
     monitor_task = None
     monitor_stop = False
 
+    if not hasattr(websocket.app.state, "active_sockets"):
+        websocket.app.state.active_sockets = {}
+
     async def silence_monitor():
         nonlocal monitor_stop, meeting_id
         while not monitor_stop:
             await asyncio.sleep(1)
             if meeting_id and last_update.get(meeting_id, 0) != 0:
                 now = time.time()
-                # 3秒以上無音かつ未生成なら議事録生成
                 if now - last_update[meeting_id] > 3 and not silence_generated.get(meeting_id, False):
                     await generate_minutes(meeting_id)
                     last_update[meeting_id] = now
                     silence_generated[meeting_id] = True
-                    # minutesをクライアントに送信
                     minutes = minutes_store.get(meeting_id, "")
                     if minutes:
-                        try:
-                            await websocket.send_text(json.dumps({"type": "minutes", "minutes": minutes}))
-                        except Exception:
-                            break
+                        for ws in websocket.app.state.active_sockets.get(meeting_id, []):
+                            try:
+                                await ws.send_text(json.dumps({"type": "minutes", "minutes": minutes}))
+                            except Exception:
+                                continue
 
     try:
         monitor_task = asyncio.create_task(silence_monitor())
@@ -119,7 +126,6 @@ async def websocket_endpoint(websocket: WebSocket):
             try:
                 data = await websocket.receive_text()
             except WebSocketDisconnect:
-                # クライアント切断時はループを抜けて終了
                 break
             try:
                 obj = json.loads(data)
@@ -127,6 +133,11 @@ async def websocket_endpoint(websocket: WebSocket):
                 text = obj.get("text", "")
                 is_final = obj.get("is_final", False)
                 if meeting_id:
+                    if meeting_id not in websocket.app.state.active_sockets:
+                        websocket.app.state.active_sockets[meeting_id] = []
+                    if websocket not in websocket.app.state.active_sockets[meeting_id]:
+                        websocket.app.state.active_sockets[meeting_id].append(websocket)
+
                     if meeting_id not in buffers:
                         buffers[meeting_id] = []
                         last_update[meeting_id] = 0
@@ -134,35 +145,29 @@ async def websocket_endpoint(websocket: WebSocket):
                         all_texts[meeting_id] = []
                     if meeting_id not in silence_generated:
                         silence_generated[meeting_id] = False
-                    # 議題（topic）が送信されていれば保存
                     topic = obj.get("topic")
                     if topic is not None and topic != "":
                         topics[meeting_id] = topic
-                    buffers[meeting_id].append(text)
-                    all_texts[meeting_id].append(text)
-                    now = time.time()
-                    # 3秒以上間隔が空いた場合に議事録生成
-                    if now - last_update[meeting_id] > 3 and last_update[meeting_id] != 0 and not silence_generated.get(meeting_id, False):
+
+                    if text:
+                        buffers[meeting_id].append(text)
+                        all_texts[meeting_id].append(text)
                         await generate_minutes(meeting_id)
-                        last_update[meeting_id] = now
-                        silence_generated[meeting_id] = True
-                        # minutesをクライアントに送信
                         minutes = minutes_store.get(meeting_id, "")
                         if minutes:
-                            try:
-                                await websocket.send_text(json.dumps({"type": "minutes", "minutes": minutes}))
-                            except Exception:
-                                # 送信失敗時は無視してループ終了
-                                break
-                    # 最終受信時刻を更新
+                            for ws in websocket.app.state.active_sockets[meeting_id]:
+                                try:
+                                    await ws.send_text(json.dumps({"type": "minutes", "minutes": minutes}))
+                                except Exception:
+                                    continue
+
+                    now = time.time()
                     last_update[meeting_id] = now
-                    # 音声受信があったのでフラグをリセット
                     silence_generated[meeting_id] = False
             except Exception as e:
                 try:
                     await websocket.send_text(f"Error: {e}")
                 except Exception:
-                    # 送信失敗時は無視してループ終了
                     break
     except Exception:
         pass
@@ -171,52 +176,27 @@ async def websocket_endpoint(websocket: WebSocket):
         if monitor_task:
             await monitor_task
 
-# /rtmmg/socket/ でもWebSocketを受け付ける
 @app.websocket("/rtmmg/socket/")
 async def websocket_endpoint_slash(websocket: WebSocket):
-    # Originチェック
-    allowed_origins = [
-        "http://localhost",
-        "https://localhost",
-        "http://127.0.0.1",
-        "https://127.0.0.1",
-        "https://queryaiservice.japaneast.cloudapp.azure.com",
-        # 必要に応じて本番ドメインを追加
-        # "https://example.com"
-    ]
-    origin = websocket.headers.get("origin")
-    print(f"[WebSocket接続] Origin: {origin}")
-    if origin not in allowed_origins:
-        print(f"[WebSocket拒否] 許可されていないOrigin: {origin}")
-        await websocket.close(code=1008)
-        return
-
     await websocket_endpoint(websocket)
 
-# 議事録生成（OpenAI GPT-4.1連携）
 import os
 import openai
 
 async def generate_minutes(meeting_id):
-    # 録音開始から取得したすべての会話データを使う
     texts = all_texts.get(meeting_id, [])
     if not texts:
         return
-    # オプション取得
     options = options_store.get(meeting_id, {})
-    # 先に会議情報を取得
-    # 入力された議題があれば最優先で題名に使う
     title = topics.get(meeting_id) or options.get("title", "")
     members = options.get("members", "")
     import datetime
     date = options.get("date", "")
     if not date:
-        # 日本時間で現在時刻を "YYYY-MM-DD HH:MM" 形式でセット
         now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9)))
         date = now.strftime("%Y-%m-%d %H:%M")
     agenda = options.get("agenda", "")
     purpose = options.get("purpose", "")
-    # 各会議情報が空の場合はAIに推測させる指示を追加
     def info_or_guess(label, value):
         return f"{label}は「{value}」です。" if value else f"{label}は会話内容から推測して埋めてください。"
 
@@ -250,7 +230,6 @@ async def generate_minutes(meeting_id):
         + (f"プロンプトは「{options.get('prompt')}」です。" if options.get("prompt") else "プロンプトも会話内容から推測して埋めてください。")
     )
 
-    # OpenAI API呼び出し
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         summary = "\n".join(texts) + "\n\n（APIキー未設定のため要約なし）"
@@ -266,7 +245,7 @@ async def generate_minutes(meeting_id):
             response = await client.chat.completions.create(
                 model="gpt-4.1-mini", 
                 messages=[
-                    {"role": "system", "content": "あなたは優秀な日本語の議事録作成AIです。"},
+                    {"role": "system", "content": "あなたは優秀な日本語の議事録作成AIです."},
                     {"role": "user", "content": user_content}
                 ],
                 max_tokens=2048,
@@ -278,10 +257,7 @@ async def generate_minutes(meeting_id):
 
     minutes_store[meeting_id] = summary
     print(f"[minutes生成] meeting_id={meeting_id}\n{summary}\n")
-    # バッファをクリア
     buffers[meeting_id] = []
-
-# --- 以下、議事録・オプション管理API（仮実装） ---
 
 from fastapi import Query
 from fastapi import Body
@@ -293,7 +269,6 @@ options_store: Dict[str, dict] = {}
 
 @app.get("/rtmmg/minutes", response_class=PlainTextResponse)
 async def get_minutes(meeting_id: str = Query(...)):
-    # 仮実装: メモリ上のminutes_storeから取得
     return minutes_store.get(meeting_id, "まだ議事録はありません")
 
 @app.post("/rtmmg/finalize_minutes", response_class=PlainTextResponse)
@@ -310,3 +285,40 @@ async def set_options(data: dict = Body(...)):
     if meeting_id:
         options_store[meeting_id] = data
     return {"status": "ok"}
+
+# --- 音声ファイルアップロード＆mp3変換API ---
+import tempfile
+import subprocess
+from fastapi import UploadFile, File
+from fastapi.responses import FileResponse
+
+@app.post("/rtmmg/upload_audio")
+async def upload_audio(meeting_id: str = Body(...), file: UploadFile = File(...)):
+    # 一時ファイルに保存
+    with tempfile.NamedTemporaryFile(suffix=".webm", delete=False) as temp_webm:
+        content = await file.read()
+        temp_webm.write(content)
+        temp_webm.flush()
+        webm_path = temp_webm.name
+
+    m4a_path = webm_path.replace(".webm", ".m4a")
+    # ffmpegでm4a(aac)変換
+    try:
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-i", webm_path,
+            "-vn",
+            "-c:a", "aac",
+            "-b:a", "128k",
+            m4a_path
+        ]
+        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except Exception as e:
+        return JSONResponse({"status": "ng", "message": f"ffmpeg変換エラー: {e}"}, status_code=500)
+
+    return JSONResponse({"status": "ok", "download_url": f"/rtmmg/download_audio?path={m4a_path}"})
+
+@app.get("/rtmmg/download_audio")
+async def download_audio(path: str):
+    return FileResponse(path, media_type="audio/mp4", filename="recording.m4a")
